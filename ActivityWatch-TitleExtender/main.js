@@ -1,5 +1,7 @@
+const AT_PREFIX = /^@/;
+
 (() => {
-  const SEP = "⌈";
+  const SEP = " ∼ ";
   const ACTIVE_SCRAPER_UNSET = Symbol("active-scraper-unset");
   let rawTitle = "";
   let pollInterval = null;
@@ -45,41 +47,79 @@
     },
   });
 
+  function channelFromLdJsonData(data) {
+    let items;
+    if (Array.isArray(data)) {
+      items = data;
+    } else if (data["@graph"]) {
+      items = [].concat(data["@graph"]);
+    } else {
+      items = [data];
+    }
+    for (const item of items) {
+      if (item["@type"] !== "VideoObject" || !item.author) {
+        continue;
+      }
+      const name =
+        typeof item.author === "string" ? item.author : item.author?.name;
+      if (name) {
+        return name;
+      }
+    }
+    return null;
+  }
+
+  function ytChannelFromLdJson() {
+    const scripts = document.querySelectorAll(
+      'script[type="application/ld+json"]'
+    );
+    for (const script of scripts) {
+      try {
+        const name = channelFromLdJsonData(JSON.parse(script.textContent));
+        if (name) {
+          return name;
+        }
+      } catch {
+        // malformed script tag — skip
+      }
+    }
+    return null;
+  }
+
   const SCRAPERS = [
     {
       name: "youtube",
       match: (host) => host === "youtube.com" || host.endsWith(".youtube.com"),
       scrape() {
-        const metadata = [];
-        const channelEl = document.querySelector(
-          "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a"
+        const ldName = ytChannelFromLdJson();
+        if (ldName) {
+          return { metadata: [`channel: ${ldName}`], complete: true };
+        }
+
+        const shortsAnchor = document.querySelector(
+          "span.ytReelChannelBarViewModelChannelName a"
         );
-
-        if (channelEl) {
-          const channelName = channelEl.innerText.trim();
-          if (channelName) {
-            metadata.push(`channel: ${channelName}`);
-          }
+        if (shortsAnchor) {
+          const handle = shortsAnchor.textContent.trim().replace(AT_PREFIX, "");
+          return {
+            metadata: handle ? [`channel: ${handle}`] : [],
+            complete: Boolean(handle),
+          };
         }
 
-        const durationEl = document.querySelector(".ytp-time-duration");
-        if (durationEl) {
-          const duration = durationEl.innerText.trim();
-          if (duration && duration !== "0:00") {
-            metadata.push(`length: ${duration}`);
-          }
-        }
-
-        const dateEl = document.querySelector('meta[itemprop="datePublished"]');
-        if (dateEl?.content) {
-          metadata.push(`published: ${dateEl.content}`);
-        }
-
+        const channelName =
+          document
+            .querySelector('span[itemprop="author"] link[itemprop="name"]')
+            ?.getAttribute("content") ||
+          document
+            .querySelector(
+              "ytd-video-owner-renderer #channel-name a, #owner-name a"
+            )
+            ?.innerText.trim() ||
+          "";
         return {
-          metadata,
-          complete: Boolean(
-            channelEl && durationEl && durationEl.innerText.trim() !== "0:00"
-          ),
+          metadata: channelName ? [`channel: ${channelName}`] : [],
+          complete: Boolean(channelName),
         };
       },
     },
@@ -134,9 +174,9 @@
 
   function updateTitle(siteMetadata) {
     const metadata = siteMetadata ?? scrapeSiteMetadata().metadata;
-    const simpleUrl = window.location.hostname + window.location.pathname;
 
-    const formatted = [rawTitle, simpleUrl, ...metadata].join(SEP) + SEP;
+    const formatted =
+      [rawTitle, window.location.href, ...metadata].join(SEP) + SEP;
     if (formatted === lastFormattedTitle) {
       return metadata;
     }
