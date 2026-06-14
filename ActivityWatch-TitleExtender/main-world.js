@@ -30,6 +30,8 @@
   rawTitle = stripMetadata(rawGet.call(document));
 
   Object.defineProperty(Document.prototype, "title", {
+    configurable: titleDesc.configurable,
+    enumerable: titleDesc.enumerable,
     get() {
       return rawTitle;
     },
@@ -54,7 +56,7 @@
   const SCRAPERS = [
     {
       name: "youtube",
-      match: (host) => host.includes("youtube.com"),
+      match: (host) => host === "youtube.com" || host.endsWith(".youtube.com"),
       _cache: null,
       isComplete() {
         return this._cache !== null;
@@ -67,11 +69,19 @@
         let channelName = "";
         let videoId = "";
 
-        // Primary: page-level global (fast, no DOM query)
+        const paramsVideoId = new URLSearchParams(window.location.search).get("v");
+        const pathVideoId = window.location.pathname.match(/^\/(?:shorts|live|embed)\/([^/?#]+)/)?.[1];
+        const urlVideoId = paramsVideoId || pathVideoId || "";
+
+        // Primary: page-level global (fast, no DOM query). YouTube SPAs can leave
+        // this global stale briefly, so only trust it when it matches the URL.
         const playerResponse = window.ytInitialPlayerResponse;
-        if (playerResponse?.videoDetails) {
-          channelName = playerResponse.videoDetails.author;
-          videoId = playerResponse.videoDetails.videoId;
+        const playerVideoId = playerResponse?.videoDetails?.videoId || "";
+        if (urlVideoId && playerResponse?.videoDetails) {
+          if (playerVideoId === urlVideoId) {
+            channelName = playerResponse.videoDetails.author || "";
+            videoId = playerVideoId;
+          }
         }
 
         // Fallback: DOM query if global is not yet populated
@@ -82,29 +92,36 @@
           if (channelEl) channelName = channelEl.innerText.trim();
         }
 
-        if (!videoId) {
-          videoId = new URLSearchParams(window.location.search).get("v");
-        }
+        if (!videoId) videoId = urlVideoId;
 
         if (channelName) metadata.push(`channel: ${channelName}`);
         if (videoId) metadata.push(`video_id: ${videoId}`);
 
-        // Cache once fully resolved
-        if (channelName && videoId) this._cache = metadata;
+        // Cache only when the page-level response agrees with the current URL.
+        if (channelName && videoId && playerVideoId === urlVideoId) {
+          this._cache = metadata;
+        }
 
         return metadata;
       },
     },
     {
       name: "gmail",
-      match: (host) => host.includes("mail.google.com"),
+      match: (host) => host === "mail.google.com",
+      _cache: null,
+      isComplete() {
+        return this._cache !== null;
+      },
       scrape() {
+        if (this._cache) return this._cache;
+
         const metadata = [];
         const senderEl = document.querySelector(".gD");
         if (senderEl) {
           const sender = senderEl.getAttribute("email") || senderEl.innerText.trim();
           if (sender) metadata.push(`sender: ${sender}`);
         }
+        if (metadata.length) this._cache = metadata;
         return metadata;
       },
     },
@@ -113,15 +130,20 @@
   // Cache the matched scraper for the current host (SCRAPERS.find is only called once)
   let _activeScraper = null;
 
-  function getSiteMetadata() {
+  function getActiveScraper() {
     if (_activeScraper === null) {
       _activeScraper = SCRAPERS.find((s) => s.match(window.location.hostname)) ?? undefined;
     }
-    if (_activeScraper) {
+    return _activeScraper;
+  }
+
+  function getSiteMetadata() {
+    const scraper = getActiveScraper();
+    if (scraper) {
       try {
-        return _activeScraper.scrape();
+        return scraper.scrape();
       } catch (e) {
-        console.error(`[AW Extender] Scraper error on ${_activeScraper.name}:`, e);
+        console.error(`[AW Extender] Scraper error on ${scraper.name}:`, e);
       }
     }
     return [];
@@ -152,6 +174,12 @@
   function startMetadataPolling() {
     if (pollInterval) clearInterval(pollInterval);
 
+    const scraper = getActiveScraper();
+    if (!scraper) {
+      pollInterval = null;
+      return;
+    }
+
     let attempts = 0;
     const maxAttempts = 15; // 15 × 400ms = 6s max
 
@@ -171,10 +199,7 @@
       }
 
       // [P2] Early exit: stop once the scraper signals completion or attempts are exhausted.
-      //      Sites with no scraper (_activeScraper is undefined) exit immediately.
-      const scraperDone = _activeScraper
-        ? (_activeScraper.isComplete?.() ?? false) // has scraper but no isComplete → keep polling
-        : true;                                    // no scraper → nothing to wait for
+      const scraperDone = scraper.isComplete?.() ?? false; // has scraper but no isComplete → keep polling
 
       if (scraperDone || attempts >= maxAttempts) {
         clearInterval(pollInterval);
@@ -231,6 +256,10 @@
       let titleChanged = false;
       for (const mutation of mutations) {
         if (mutation.type === "childList") {
+          if (mutation.target.nodeName === "TITLE") {
+            titleChanged = true;
+            break;
+          }
           for (const addedNode of mutation.addedNodes) {
             if (addedNode.nodeName === "TITLE") {
               titleChanged = true;
