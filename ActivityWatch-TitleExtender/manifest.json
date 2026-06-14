@@ -1,13 +1,29 @@
 {
   "manifest_version": 3,
-  "name": "ActivityWatch Positional Title Tracking",
-  "version": "2.5",
-  "description": "Formats title as: RawTitle ||| Domain ||| key: value |||",
+  "name": "ActivityWatch Title Extender",
+  "version": "3.0",
+  "description": "Enriches browser tab titles with metadata (URL, audio status, channel/sender info) for ActivityWatch window-tracking.",
+  "permissions": [
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["main-world.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
       "all_frames": false
     }
   ]

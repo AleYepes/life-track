@@ -1,101 +1,28 @@
+// Isolated-World Content Script (Bridge)
 (function () {
   "use strict";
 
-  const SEP = " ||| ";
-  let currentExtraInfo = "";
-  let isUpdating = false;
-  let pollId = null;
+  // Helper to forward state updates to the main-world script via a custom DOM event
+  function dispatchToMainWorld(state) {
+    const event = new CustomEvent("AW_STATE_UPDATE", { detail: state });
+    window.dispatchEvent(event);
+  }
 
-  const titleDesc = Object.getOwnPropertyDescriptor(
-    Document.prototype,
-    "title",
-  );
-  const rawGet = titleDesc.get;
-  const rawSet = titleDesc.set;
-
-  Object.defineProperty(document, "title", {
-    get() {
-      return rawGet.call(this);
-    },
-    set(value) {
-      if (isUpdating) {
-        rawSet.call(this, value);
-        return;
-      }
-
-      let base = value.includes(SEP) ? value.split(SEP)[0] : value;
-      let formatted = `${base}${SEP}${window.location.href}`;
-      if (currentExtraInfo) formatted += `${SEP}${currentExtraInfo}`;
-      formatted += SEP;
-
-      isUpdating = true;
-      rawSet.call(this, formatted);
-      isUpdating = false;
-
-      waitForExtraInfo();
-    },
+  // 1. Listen for background events (e.g. audible/muted changes) and relay them
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === "STATE_UPDATE" && message.state) {
+      dispatchToMainWorld(message.state);
+    }
   });
 
-  function getExtraInfo() {
-    const host = window.location.hostname;
-
-    if (host.includes("youtube.com")) {
-      const el = document.querySelector(
-        "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a",
-      );
-      return el ? `channel: ${el.innerText.trim()}` : "";
+  // 2. Query the background script for the initial tab state on startup
+  chrome.runtime.sendMessage({ type: "GET_TAB_STATE" }, (response) => {
+    if (chrome.runtime.lastError) {
+      // Background worker might not be ready or we are on an unsupported scheme
+      return;
     }
-
-    if (host.includes("mail.google.com")) {
-      const el = document.querySelector(".gD");
-      return el
-        ? `sender: ${el.getAttribute("email") || el.innerText.trim()}`
-        : "";
+    if (response) {
+      dispatchToMainWorld(response);
     }
-
-    return "";
-  }
-
-  function tryLoadExtraInfo() {
-    const info = getExtraInfo();
-    const currentTitle = rawGet.call(document);
-    const hasSeparator = currentTitle.includes(SEP);
-
-    if (info === currentExtraInfo && hasSeparator) return false;
-
-    currentExtraInfo = info;
-    const base = currentTitle.includes(SEP)
-      ? currentTitle.split(SEP)[0]
-      : currentTitle;
-
-    let formatted = `${base}${SEP}${window.location.href}`;
-    if (currentExtraInfo) formatted += `${SEP}${currentExtraInfo}`;
-    formatted += SEP;
-
-    rawSet.call(document, formatted);
-
-    return info !== "";
-  }
-
-  function waitForExtraInfo() {
-    if (pollId) clearInterval(pollId);
-    if (tryLoadExtraInfo()) return;
-
-    let attempts = 0;
-    const MAX = 20;
-
-    pollId = setInterval(() => {
-      attempts++;
-      if (tryLoadExtraInfo() || attempts >= MAX) {
-        clearInterval(pollId);
-        pollId = null;
-      }
-    }, 500);
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", waitForExtraInfo);
-  } else {
-    waitForExtraInfo();
-  }
+  });
 })();
