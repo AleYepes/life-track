@@ -2,14 +2,14 @@
 (function () {
   "use strict";
 
-  const SEP = " ||| ";
+  const SEP = "⌈";
   let rawTitle = "";
   let isUpdating = false;
   let pollInterval = null;
 
   const tabState = {
     audible: false,
-    muted: false
+    muted: false,
   };
 
   // Helper to extract the raw title before our separator
@@ -19,9 +19,14 @@
   }
 
   // 1. Hook Document.prototype.title setter/getter
-  const titleDesc = Object.getOwnPropertyDescriptor(Document.prototype, "title");
+  const titleDesc = Object.getOwnPropertyDescriptor(
+    Document.prototype,
+    "title",
+  );
   if (!titleDesc) {
-    console.error("[AW Extender] Could not find Document.prototype.title descriptor.");
+    console.error(
+      "[AW Extender] Could not find Document.prototype.title descriptor.",
+    );
     return;
   }
   const rawGet = titleDesc.get;
@@ -39,7 +44,7 @@
         rawSet.call(this, value);
         return;
       }
-      
+
       const newRaw = stripMetadata(value);
       // Only trigger updates if the raw title content has actually changed
       if (newRaw !== rawTitle) {
@@ -47,7 +52,7 @@
         updateTitle();
         startMetadataPolling();
       }
-    }
+    },
   });
 
   // 2. Extensible Site Scraper Registry
@@ -57,50 +62,65 @@
       match: (host) => host.includes("youtube.com"),
       scrape: () => {
         const metadata = [];
-        
-        // Channel name selector matching various YouTube page structures
-        const channelEl = document.querySelector(
-          "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a"
-        );
-        if (channelEl) {
-          const channelName = channelEl.innerText.trim();
-          if (channelName) {
-            metadata.push(`channel: ${channelName}`);
+
+        let channelName = "";
+        let videoId = "";
+
+        // Primary: Try to extract from page-level global variable
+        const playerResponse = window.ytInitialPlayerResponse;
+        if (playerResponse && playerResponse.videoDetails) {
+          channelName = playerResponse.videoDetails.author;
+          videoId = playerResponse.videoDetails.videoId;
+        }
+
+        // Fallback: Query DOM elements if global variables are not yet populated
+        if (!channelName) {
+          const channelEl = document.querySelector(
+            "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a",
+          );
+          if (channelEl) {
+            channelName = channelEl.innerText.trim();
           }
         }
-        
-        // Video ID from search queries
-        const urlParams = new URLSearchParams(window.location.search);
-        const videoId = urlParams.get("v");
+
+        if (!videoId) {
+          const urlParams = new URLSearchParams(window.location.search);
+          videoId = urlParams.get("v");
+        }
+
+        if (channelName) {
+          metadata.push(`channel: ${channelName}`);
+        }
         if (videoId) {
           metadata.push(`video_id: ${videoId}`);
         }
-        
+
         return metadata;
-      }
+      },
     },
     {
       name: "gmail",
       match: (host) => host.includes("mail.google.com"),
       scrape: () => {
         const metadata = [];
-        
+
         // Sender element selector in Gmail conversation view
         const senderEl = document.querySelector(".gD");
         if (senderEl) {
-          const sender = senderEl.getAttribute("email") || senderEl.innerText.trim();
+          const sender =
+            senderEl.getAttribute("email") || senderEl.innerText.trim();
           if (sender) {
             metadata.push(`sender: ${sender}`);
           }
         }
         return metadata;
-      }
-    }
+      },
+    },
   ];
 
   function getSiteMetadata() {
     const host = window.location.hostname;
-    const scraper = SCRAPERS.find(s => s.match(host));
+    const scraper = SCRAPERS.find((s) => s.match(host));
     if (scraper) {
       try {
         return scraper.scrape();
@@ -128,7 +148,7 @@
       metadata.push("muted: true");
     }
 
-    // Assemble components: Title ||| URL ||| key1: value1 ||| ... |||
+    // Assemble components: Title⌈URL⌈key1: value1⌈...⌈
     let parts = [currentTitle, url];
     if (metadata.length > 0) {
       parts = parts.concat(metadata);
@@ -247,7 +267,7 @@
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
-      characterData: true
+      characterData: true,
     });
   }
 
