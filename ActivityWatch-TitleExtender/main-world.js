@@ -115,19 +115,25 @@ const YOUTUBE_PATH_VIDEO_ID_RE = /^\/(?:shorts|live|embed)\/([^/?#]+)/;
       match: (host) => host === "mail.google.com",
       scrape() {
         const metadata = [];
-        const senderEl = document.querySelector(
-          ".h7.ie.nH.if .gD[email], .h7.ie.nH.if .gD"
+        const openMessage = document.querySelector(
+          '[role="listitem"][aria-expanded="true"]'
         );
 
-        if (senderEl) {
-          const sender =
-            senderEl.getAttribute("email") || senderEl.innerText.trim();
-          if (sender) {
-            metadata.push(`sender: ${sender}`);
+        if (openMessage) {
+          const senderEl = openMessage.querySelector(
+            "[jid], [data-hovercard-id]"
+          );
+          if (senderEl) {
+            const sender =
+              senderEl.getAttribute("jid") ||
+              senderEl.getAttribute("data-hovercard-id");
+            if (sender) {
+              metadata.push(`sender: ${sender}`);
+            }
           }
         }
 
-        return { metadata, complete: Boolean(senderEl) };
+        return { metadata, complete: Boolean(metadata.length > 0) };
       },
     },
   ];
