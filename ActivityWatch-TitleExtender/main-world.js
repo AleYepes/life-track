@@ -1,16 +1,9 @@
-const YOUTUBE_PATH_VIDEO_ID_RE = /^\/(?:shorts|live|embed)\/([^/?#]+)/;
-
 (() => {
   const SEP = "⌈";
   const ACTIVE_SCRAPER_UNSET = Symbol("active-scraper-unset");
   let rawTitle = "";
   let pollInterval = null;
   let lastFormattedTitle = "";
-
-  const tabState = {
-    audible: false,
-    muted: false,
-  };
 
   function stripMetadata(title) {
     if (!title) {
@@ -58,56 +51,36 @@ const YOUTUBE_PATH_VIDEO_ID_RE = /^\/(?:shorts|live|embed)\/([^/?#]+)/;
       match: (host) => host === "youtube.com" || host.endsWith(".youtube.com"),
       scrape() {
         const metadata = [];
-        let channelName = "";
-        const paramsVideoId = new URLSearchParams(window.location.search).get(
-          "v"
+        const channelEl = document.querySelector(
+          "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a"
         );
-        const pathVideoId = window.location.pathname.match(
-          YOUTUBE_PATH_VIDEO_ID_RE
-        )?.[1];
-        const urlVideoId = paramsVideoId || pathVideoId || "";
-        let videoId = urlVideoId;
 
-        const playerResponse = window.ytInitialPlayerResponse;
-        const playerVideoId = playerResponse?.videoDetails?.videoId || "";
-        const domVideoId = document
-          .querySelector("ytd-watch-flexy")
-          ?.getAttribute("video-id");
-
-        if (
-          urlVideoId &&
-          playerResponse?.videoDetails &&
-          playerVideoId === urlVideoId
-        ) {
-          channelName = playerResponse.videoDetails.author || "";
-          videoId = playerVideoId;
-        }
-
-        if (!channelName && (!urlVideoId || domVideoId === urlVideoId)) {
-          const channelEl = document.querySelector(
-            "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a"
-          );
-          if (channelEl) {
-            channelName = channelEl.innerText.trim();
+        if (channelEl) {
+          const channelName = channelEl.innerText.trim();
+          if (channelName) {
+            metadata.push(`channel: ${channelName}`);
           }
         }
 
-        if (channelName) {
-          metadata.push(`channel: ${channelName}`);
-        }
-        if (videoId) {
-          metadata.push(`video_id: ${videoId}`);
+        const durationEl = document.querySelector(".ytp-time-duration");
+        if (durationEl) {
+          const duration = durationEl.innerText.trim();
+          if (duration && duration !== "0:00") {
+            metadata.push(`length: ${duration}`);
+          }
         }
 
-        const complete =
-          !urlVideoId ||
-          Boolean(
-            channelName &&
-              videoId &&
-              (domVideoId === urlVideoId || playerVideoId === urlVideoId)
-          );
+        const dateEl = document.querySelector('meta[itemprop="datePublished"]');
+        if (dateEl?.content) {
+          metadata.push(`published: ${dateEl.content}`);
+        }
 
-        return { metadata, complete };
+        return {
+          metadata,
+          complete: Boolean(
+            channelEl && durationEl && durationEl.innerText.trim() !== "0:00"
+          ),
+        };
       },
     },
     {
@@ -160,19 +133,12 @@ const YOUTUBE_PATH_VIDEO_ID_RE = /^\/(?:shorts|live|embed)\/([^/?#]+)/;
   }
 
   function updateTitle(siteMetadata) {
-    const scrapedMetadata = siteMetadata ?? scrapeSiteMetadata().metadata;
-    const metadata = [...scrapedMetadata];
-    if (tabState.audible) {
-      metadata.push("audible: true");
-    }
-    if (tabState.muted) {
-      metadata.push("muted: true");
-    }
+    const metadata = siteMetadata ?? scrapeSiteMetadata().metadata;
+    const simpleUrl = window.location.hostname + window.location.pathname;
 
-    const formatted =
-      [rawTitle, window.location.href, ...metadata].join(SEP) + SEP;
+    const formatted = [rawTitle, simpleUrl, ...metadata].join(SEP) + SEP;
     if (formatted === lastFormattedTitle) {
-      return scrapedMetadata;
+      return metadata;
     }
 
     try {
@@ -182,7 +148,7 @@ const YOUTUBE_PATH_VIDEO_ID_RE = /^\/(?:shorts|live|embed)\/([^/?#]+)/;
       console.error("[AW Extender] Failed to set document title:", e);
     }
 
-    return scrapedMetadata;
+    return metadata;
   }
 
   function startMetadataPolling({
@@ -340,24 +306,6 @@ const YOUTUBE_PATH_VIDEO_ID_RE = /^\/(?:shorts|live|embed)\/([^/?#]+)/;
 
     return titleObserved;
   }
-
-  window.addEventListener("AW_STATE_UPDATE", (e) => {
-    const state = e.detail;
-    let changed = false;
-
-    if (state.audible !== undefined && state.audible !== tabState.audible) {
-      tabState.audible = state.audible;
-      changed = true;
-    }
-    if (state.muted !== undefined && state.muted !== tabState.muted) {
-      tabState.muted = state.muted;
-      changed = true;
-    }
-
-    if (changed) {
-      updateTitle();
-    }
-  });
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {
