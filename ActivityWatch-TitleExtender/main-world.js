@@ -1,26 +1,32 @@
-// Main-World Content Script (Executes in the page context)
-(function () {
-  "use strict";
+const YOUTUBE_PATH_VIDEO_ID_RE = /^\/(?:shorts|live|embed)\/([^/?#]+)/;
 
+(() => {
   const SEP = "⌈";
   let rawTitle = "";
   let pollInterval = null;
+  let lastFormattedTitle = "";
 
   const tabState = {
     audible: false,
     muted: false,
   };
 
-  // Helper to extract the raw title before our separator
   function stripMetadata(title) {
-    if (!title) return "";
-    return title.includes(SEP) ? title.split(SEP)[0] : title;
+    if (!title) {
+      return "";
+    }
+    const sepIndex = title.indexOf(SEP);
+    return sepIndex === -1 ? title : title.slice(0, sepIndex);
   }
 
-  // 1. Hook Document.prototype.title setter/getter
-  const titleDesc = Object.getOwnPropertyDescriptor(Document.prototype, "title");
+  const titleDesc = Object.getOwnPropertyDescriptor(
+    Document.prototype,
+    "title"
+  );
   if (!titleDesc) {
-    console.error("[AW Extender] Could not find Document.prototype.title descriptor.");
+    console.error(
+      "[AW Extender] Could not find Document.prototype.title descriptor."
+    );
     return;
   }
   const rawGet = titleDesc.get;
@@ -28,6 +34,7 @@
 
   rawTitle = stripMetadata(rawGet.call(document));
 
+  // Page scripts keep seeing the clean title while Chromium exposes the enriched title.
   Object.defineProperty(Document.prototype, "title", {
     configurable: titleDesc.configurable,
     enumerable: titleDesc.enumerable,
@@ -44,107 +51,98 @@
     },
   });
 
-  // 2. Extensible Site Scraper Registry
-  //    Each scraper may optionally define:
-  //      isComplete() → true once all fields are resolved (enables early poll exit)
-  //      _cache       → populated by scrape() to skip repeated work (P1)
   const SCRAPERS = [
     {
       name: "youtube",
       match: (host) => host === "youtube.com" || host.endsWith(".youtube.com"),
-      _cache: null,
-      isComplete() {
-        return this._cache !== null;
-      },
-      _lastUrl: "",
-      _urlVideoId: "",
       scrape() {
-        // [P1] Return cached result once both fields are resolved
-        if (this._cache) return this._cache;
-
-        const currentUrl = window.location.href;
-        if (this._lastUrl !== currentUrl) {
-          this._lastUrl = currentUrl;
-          const paramsVideoId = new URLSearchParams(window.location.search).get("v");
-          const pathVideoId = window.location.pathname.match(/^\/(?:shorts|live|embed)\/([^/?#]+)/)?.[1];
-          this._urlVideoId = paramsVideoId || pathVideoId || "";
-        }
-
         const metadata = [];
         let channelName = "";
-        let videoId = "";
+        const paramsVideoId = new URLSearchParams(window.location.search).get(
+          "v"
+        );
+        const pathVideoId = window.location.pathname.match(
+          YOUTUBE_PATH_VIDEO_ID_RE
+        )?.[1];
+        const urlVideoId = paramsVideoId || pathVideoId || "";
+        let videoId = urlVideoId;
 
-        const urlVideoId = this._urlVideoId;
-
-        // Primary: page-level global (fast, no DOM query). YouTube SPAs can leave
-        // this global stale briefly, so only trust it when it matches the URL.
         const playerResponse = window.ytInitialPlayerResponse;
         const playerVideoId = playerResponse?.videoDetails?.videoId || "";
-        if (urlVideoId && playerResponse?.videoDetails) {
-          if (playerVideoId === urlVideoId) {
-            channelName = playerResponse.videoDetails.author || "";
-            videoId = playerVideoId;
+        const domVideoId = document
+          .querySelector("ytd-watch-flexy")
+          ?.getAttribute("video-id");
+
+        if (
+          urlVideoId &&
+          playerResponse?.videoDetails &&
+          playerVideoId === urlVideoId
+        ) {
+          channelName = playerResponse.videoDetails.author || "";
+          videoId = playerVideoId;
+        }
+
+        if (!channelName && (!urlVideoId || domVideoId === urlVideoId)) {
+          const channelEl = document.querySelector(
+            "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a"
+          );
+          if (channelEl) {
+            channelName = channelEl.innerText.trim();
           }
         }
 
-        // Fallback: DOM query if global is not yet populated
-        if (!channelName) {
-          const channelEl = document.querySelector(
-            "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a",
+        if (channelName) {
+          metadata.push(`channel: ${channelName}`);
+        }
+        if (videoId) {
+          metadata.push(`video_id: ${videoId}`);
+        }
+
+        const complete =
+          !urlVideoId ||
+          Boolean(
+            channelName &&
+              videoId &&
+              (domVideoId === urlVideoId || playerVideoId === urlVideoId)
           );
-          if (channelEl) channelName = channelEl.innerText.trim();
-        }
 
-        if (!videoId) videoId = urlVideoId;
-
-        if (channelName) metadata.push(`channel: ${channelName}`);
-        if (videoId) metadata.push(`video_id: ${videoId}`);
-
-        // Ensure the DOM is fresh before caching in SPAs
-        const domVideoId = document.querySelector('ytd-watch-flexy')?.getAttribute('video-id');
-        const isFresh = domVideoId === urlVideoId || playerVideoId === urlVideoId;
-
-        // Cache only when the page-level response or DOM agrees with the current URL.
-        if (channelName && videoId && isFresh) {
-          this._cache = metadata;
-        }
-
-        return metadata;
+        return { metadata, complete };
       },
     },
     {
       name: "gmail",
       match: (host) => host === "mail.google.com",
-      _cache: null,
-      isComplete() {
-        return this._cache !== null;
-      },
       scrape() {
-        if (this._cache) return this._cache;
-
         const metadata = [];
-        const senderEl = document.querySelector(".gD");
+        const senderEls = Array.from(
+          document.querySelectorAll(".adn.ads .gD[email], .gD[email], .gD")
+        );
+        const senderEl = senderEls.find((el) => el.getClientRects().length > 0);
+
         if (senderEl) {
-          const sender = senderEl.getAttribute("email") || senderEl.innerText.trim();
-          if (sender) metadata.push(`sender: ${sender}`);
+          const sender =
+            senderEl.getAttribute("email") || senderEl.innerText.trim();
+          if (sender) {
+            metadata.push(`sender: ${sender}`);
+          }
         }
-        if (metadata.length) this._cache = metadata;
-        return metadata;
+
+        return { metadata, complete: false };
       },
     },
   ];
 
-  // Cache the matched scraper for the current host (SCRAPERS.find is only called once)
   let _activeScraper = null;
 
   function getActiveScraper() {
     if (_activeScraper === null) {
-      _activeScraper = SCRAPERS.find((s) => s.match(window.location.hostname)) ?? undefined;
+      _activeScraper =
+        SCRAPERS.find((s) => s.match(window.location.hostname)) ?? undefined;
     }
     return _activeScraper;
   }
 
-  function getSiteMetadata() {
+  function scrapeSiteMetadata() {
     const scraper = getActiveScraper();
     if (scraper) {
       try {
@@ -153,35 +151,43 @@
         console.error(`[AW Extender] Scraper error on ${scraper.name}:`, e);
       }
     }
-    return [];
+    return { metadata: [], complete: true };
   }
 
   let isUpdatingTitle = false;
 
-  // 3. Format and update the tab title
-  //    Accepts optional pre-computed siteMetadata to avoid a redundant getSiteMetadata() call (P3)
   function updateTitle(siteMetadata) {
-    // Note: Spread syntax is intentional to avoid mutating the cached array from the scraper
-    const metadata = [...(siteMetadata ?? getSiteMetadata())];
-    if (tabState.audible) metadata.push("audible: true");
-    if (tabState.muted) metadata.push("muted: true");
+    const metadata = [...(siteMetadata ?? scrapeSiteMetadata().metadata)];
+    if (tabState.audible) {
+      metadata.push("audible: true");
+    }
+    if (tabState.muted) {
+      metadata.push("muted: true");
+    }
 
-    const formatted = [rawTitle || "", window.location.href, ...metadata].join(SEP) + SEP;
+    const formatted =
+      [rawTitle || "", window.location.href, ...metadata].join(SEP) + SEP;
+    if (formatted === lastFormattedTitle) {
+      return;
+    }
 
     try {
       isUpdatingTitle = true;
       rawSet.call(document, formatted);
+      lastFormattedTitle = formatted;
     } catch (e) {
       console.error("[AW Extender] Failed to set document title:", e);
     } finally {
-      // Clear flag after the MutationObserver microtask runs
-      setTimeout(() => { isUpdatingTitle = false; }, 0);
+      setTimeout(() => {
+        isUpdatingTitle = false;
+      }, 0);
     }
   }
 
-  // 4. Poll for metadata when elements load asynchronously
-  function startMetadataPolling() {
-    if (pollInterval) clearInterval(pollInterval);
+  function startMetadataPolling(forceFirstUpdate = false) {
+    if (pollInterval) {
+      clearInterval(pollInterval);
+    }
 
     const scraper = getActiveScraper();
     if (!scraper) {
@@ -190,37 +196,33 @@
     }
 
     let attempts = 0;
-    const maxAttempts = 15; // 15 × 400ms = 6s max
-
-    // [B4] Seed with current metadata so the first tick doesn't trigger a
-    //      redundant updateTitle() when the caller already ran it.
-    let lastMetadataStr = getSiteMetadata().join(",");
+    const maxAttempts = 15;
+    let lastMetadataStr = forceFirstUpdate
+      ? null
+      : scrapeSiteMetadata().metadata.join(",");
 
     pollInterval = setInterval(() => {
       attempts++;
 
-      const siteMetadata = getSiteMetadata();
-      const metadataStr = siteMetadata.join(",");
+      const result = scrapeSiteMetadata();
+      const metadataStr = result.metadata.join(",");
 
       if (metadataStr !== lastMetadataStr) {
         lastMetadataStr = metadataStr;
-        updateTitle(siteMetadata); // [P3] pass pre-computed metadata
+        updateTitle(result.metadata);
       }
 
-      // [P2] Early exit: stop once the scraper signals completion or attempts are exhausted.
-      const scraperDone = scraper.isComplete?.() ?? false; // has scraper but no isComplete → keep polling
-
-      if (scraperDone || attempts >= maxAttempts) {
+      if (result.complete || attempts >= maxAttempts) {
         clearInterval(pollInterval);
         pollInterval = null;
       }
     }, 400);
   }
 
-  // 5. Hook history pushState/replaceState to detect SPA URL transitions
   function hookHistory() {
-    // [B3] Guard: pushState may not exist on non-HTTP pages (e.g. file://, chrome://)
-    if (typeof history === "undefined" || !history.pushState) return;
+    if (typeof history === "undefined" || !history.pushState) {
+      return;
+    }
 
     const pushState = history.pushState;
     const replaceState = history.replaceState;
@@ -243,18 +245,20 @@
     const currentUrl = window.location.href;
     if (currentUrl !== lastUrl) {
       lastUrl = currentUrl;
-      _activeScraper = null; // Force re-evaluation of scraper on url change
-      updateTitle([]); // Clear metadata fields immediately on URL change
-      startMetadataPolling();
+      _activeScraper = null;
+      updateTitle([]);
+      startMetadataPolling(true);
     }
   }
 
-  // 6. MutationObservers for Title Changes
   function initMutationObserver() {
     let titleObserver = null;
+    let headObserver = null;
 
     function handleTitleChange(el) {
-      if (!el || isUpdatingTitle) return;
+      if (!el || isUpdatingTitle) {
+        return;
+      }
       const content = el.textContent;
       if (!content.includes(SEP)) {
         rawTitle = content;
@@ -264,8 +268,12 @@
     }
 
     function observeTitleEl(el) {
-      if (titleObserver) titleObserver.disconnect();
-      if (!el) return;
+      if (titleObserver) {
+        titleObserver.disconnect();
+      }
+      if (!el) {
+        return;
+      }
 
       rawTitle = stripMetadata(el.textContent);
       updateTitle();
@@ -281,35 +289,48 @@
       });
     }
 
-    // 1. Initially try to observe the title element
-    const initialTitleEl = document.querySelector("title");
-    if (initialTitleEl) observeTitleEl(initialTitleEl);
-
-    // 2. Watch document.documentElement (shallow) for title element replacement/addition
-    const headObserver = new MutationObserver((mutations) => {
-      let newTitleEl = null;
+    function findAddedTitleElement(mutations) {
       for (const mutation of mutations) {
-        if (mutation.type === "childList") {
-          for (const node of mutation.addedNodes) {
-            if (node.nodeName === "TITLE") {
-              newTitleEl = node;
-              break;
-            }
+        for (const node of mutation.addedNodes) {
+          if (node.nodeName === "TITLE") {
+            return node;
           }
         }
       }
-      if (newTitleEl) {
-        observeTitleEl(newTitleEl);
-      }
-    });
+      return null;
+    }
 
-    headObserver.observe(document.documentElement, {
-      childList: true,
-      subtree: false, // Huge performance boost over subtree: true
-    });
+    function observeHead() {
+      if (!document.head || headObserver) {
+        return;
+      }
+
+      observeTitleEl(document.querySelector("title"));
+
+      headObserver = new MutationObserver((mutations) => {
+        const newTitleEl = findAddedTitleElement(mutations);
+        if (newTitleEl) {
+          observeTitleEl(newTitleEl);
+        }
+      });
+
+      headObserver.observe(document.head, { childList: true });
+    }
+
+    observeHead();
+
+    if (!headObserver) {
+      const rootObserver = new MutationObserver(() => {
+        observeHead();
+        if (headObserver) {
+          rootObserver.disconnect();
+        }
+      });
+
+      rootObserver.observe(document.documentElement, { childList: true });
+    }
   }
 
-  // 7. Receive state updates from the isolated-world content script
   window.addEventListener("AW_STATE_UPDATE", (e) => {
     const state = e.detail;
     let changed = false;
@@ -323,10 +344,11 @@
       changed = true;
     }
 
-    if (changed) updateTitle();
+    if (changed) {
+      updateTitle();
+    }
   });
 
-  // Start initialization
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {
       initMutationObserver();

@@ -3,12 +3,8 @@
   "name": "ActivityWatch Title Extender",
   "version": "3.0",
   "description": "Enriches browser tab titles with metadata (URL, audio status, channel/sender info) for ActivityWatch window-tracking.",
-  "permissions": [
-    "tabs"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "permissions": ["tabs"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
   },
