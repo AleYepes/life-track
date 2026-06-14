@@ -16,15 +16,13 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_start",
-      "all_frames": false
+      "run_at": "document_start"
     },
     {
       "matches": ["<all_urls>"],
       "js": ["main-world.js"],
       "run_at": "document_start",
-      "world": "MAIN",
-      "all_frames": false
+      "world": "MAIN"
     }
   ]
 }

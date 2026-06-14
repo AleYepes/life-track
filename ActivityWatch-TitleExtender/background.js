@@ -36,5 +36,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     // [B1] Always call sendResponse — even when tabId is unavailable
     sendResponse({ audible: false, muted: false });
+    return;
   }
 });

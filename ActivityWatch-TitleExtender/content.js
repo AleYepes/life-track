@@ -16,13 +16,13 @@
   });
 
   // 2. Query the background script for the initial tab state on startup
-  chrome.runtime.sendMessage({ type: "GET_TAB_STATE" }, (response) => {
-    if (chrome.runtime.lastError) {
+  chrome.runtime.sendMessage({ type: "GET_TAB_STATE" })
+    .then((response) => {
+      if (response) {
+        dispatchToMainWorld(response);
+      }
+    })
+    .catch(() => {
       // Background worker might not be ready or we are on an unsupported scheme
-      return;
-    }
-    if (response) {
-      dispatchToMainWorld(response);
-    }
-  });
+    });
 })();

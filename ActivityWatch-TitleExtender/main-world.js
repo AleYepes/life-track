@@ -56,17 +56,25 @@
       isComplete() {
         return this._cache !== null;
       },
+      _lastUrl: "",
+      _urlVideoId: "",
       scrape() {
         // [P1] Return cached result once both fields are resolved
         if (this._cache) return this._cache;
+
+        const currentUrl = window.location.href;
+        if (this._lastUrl !== currentUrl) {
+          this._lastUrl = currentUrl;
+          const paramsVideoId = new URLSearchParams(window.location.search).get("v");
+          const pathVideoId = window.location.pathname.match(/^\/(?:shorts|live|embed)\/([^/?#]+)/)?.[1];
+          this._urlVideoId = paramsVideoId || pathVideoId || "";
+        }
 
         const metadata = [];
         let channelName = "";
         let videoId = "";
 
-        const paramsVideoId = new URLSearchParams(window.location.search).get("v");
-        const pathVideoId = window.location.pathname.match(/^\/(?:shorts|live|embed)\/([^/?#]+)/)?.[1];
-        const urlVideoId = paramsVideoId || pathVideoId || "";
+        const urlVideoId = this._urlVideoId;
 
         // Primary: page-level global (fast, no DOM query). YouTube SPAs can leave
         // this global stale briefly, so only trust it when it matches the URL.
@@ -148,9 +156,12 @@
     return [];
   }
 
+  let isUpdatingTitle = false;
+
   // 3. Format and update the tab title
   //    Accepts optional pre-computed siteMetadata to avoid a redundant getSiteMetadata() call (P3)
   function updateTitle(siteMetadata) {
+    // Note: Spread syntax is intentional to avoid mutating the cached array from the scraper
     const metadata = [...(siteMetadata ?? getSiteMetadata())];
     if (tabState.audible) metadata.push("audible: true");
     if (tabState.muted) metadata.push("muted: true");
@@ -158,9 +169,13 @@
     const formatted = [rawTitle || "", window.location.href, ...metadata].join(SEP) + SEP;
 
     try {
+      isUpdatingTitle = true;
       rawSet.call(document, formatted);
     } catch (e) {
       console.error("[AW Extender] Failed to set document title:", e);
+    } finally {
+      // Clear flag after the MutationObserver microtask runs
+      setTimeout(() => { isUpdatingTitle = false; }, 0);
     }
   }
 
@@ -228,9 +243,8 @@
     const currentUrl = window.location.href;
     if (currentUrl !== lastUrl) {
       lastUrl = currentUrl;
-      // Reset per-page scraper cache on SPA navigation (host stays the same)
-      if (_activeScraper) _activeScraper._cache = null;
-      updateTitle();
+      _activeScraper = null; // Force re-evaluation of scraper on url change
+      updateTitle([]); // Clear metadata fields immediately on URL change
       startMetadataPolling();
     }
   }
@@ -240,7 +254,7 @@
     let titleObserver = null;
 
     function handleTitleChange(el) {
-      if (!el) return;
+      if (!el || isUpdatingTitle) return;
       const content = el.textContent;
       if (!content.includes(SEP)) {
         rawTitle = content;
@@ -271,7 +285,7 @@
     const initialTitleEl = document.querySelector("title");
     if (initialTitleEl) observeTitleEl(initialTitleEl);
 
-    // 2. Watch document.head (shallow) for title element replacement/addition
+    // 2. Watch document.documentElement (shallow) for title element replacement/addition
     const headObserver = new MutationObserver((mutations) => {
       let newTitleEl = null;
       for (const mutation of mutations) {
@@ -279,6 +293,7 @@
           for (const node of mutation.addedNodes) {
             if (node.nodeName === "TITLE") {
               newTitleEl = node;
+              break;
             }
           }
         }
@@ -288,7 +303,7 @@
       }
     });
 
-    headObserver.observe(document.head || document.documentElement, {
+    headObserver.observe(document.documentElement, {
       childList: true,
       subtree: false, // Huge performance boost over subtree: true
     });
