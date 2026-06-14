@@ -4,7 +4,6 @@
 
   const SEP = "⌈";
   let rawTitle = "";
-  let isUpdating = false;
   let pollInterval = null;
 
   const tabState = {
@@ -36,10 +35,6 @@
       return rawTitle;
     },
     set(value) {
-      if (isUpdating) {
-        rawSet.call(this, value);
-        return;
-      }
       const newRaw = stripMetadata(value);
       if (newRaw !== rawTitle) {
         rawTitle = newRaw;
@@ -97,8 +92,12 @@
         if (channelName) metadata.push(`channel: ${channelName}`);
         if (videoId) metadata.push(`video_id: ${videoId}`);
 
-        // Cache only when the page-level response agrees with the current URL.
-        if (channelName && videoId && playerVideoId === urlVideoId) {
+        // Ensure the DOM is fresh before caching in SPAs
+        const domVideoId = document.querySelector('ytd-watch-flexy')?.getAttribute('video-id');
+        const isFresh = domVideoId === urlVideoId || playerVideoId === urlVideoId;
+
+        // Cache only when the page-level response or DOM agrees with the current URL.
+        if (channelName && videoId && isFresh) {
           this._cache = metadata;
         }
 
@@ -152,21 +151,16 @@
   // 3. Format and update the tab title
   //    Accepts optional pre-computed siteMetadata to avoid a redundant getSiteMetadata() call (P3)
   function updateTitle(siteMetadata) {
-    if (isUpdating) return;
-
     const metadata = [...(siteMetadata ?? getSiteMetadata())];
     if (tabState.audible) metadata.push("audible: true");
     if (tabState.muted) metadata.push("muted: true");
 
     const formatted = [rawTitle || "", window.location.href, ...metadata].join(SEP) + SEP;
 
-    isUpdating = true;
     try {
       rawSet.call(document, formatted);
     } catch (e) {
       console.error("[AW Extender] Failed to set document title:", e);
-    } finally {
-      isUpdating = false;
     }
   }
 
@@ -241,61 +235,62 @@
     }
   }
 
-  // 6. MutationObserver — scoped to <head> only
-  //    [P4] The original observer watched document.documentElement with subtree+characterData,
-  //    firing on every text-node change across the entire page (very expensive on Gmail, etc.).
-  //    <title> is always a direct child of <head>, so limiting scope to <head> is sufficient.
+  // 6. MutationObservers for Title Changes
   function initMutationObserver() {
-    const titleEl = document.querySelector("title");
-    if (titleEl) {
-      rawTitle = stripMetadata(titleEl.textContent);
-      updateTitle();
+    let titleObserver = null;
+
+    function handleTitleChange(el) {
+      if (!el) return;
+      const content = el.textContent;
+      if (!content.includes(SEP)) {
+        rawTitle = content;
+        updateTitle();
+        startMetadataPolling();
+      }
     }
 
-    const observer = new MutationObserver((mutations) => {
-      let titleChanged = false;
+    function observeTitleEl(el) {
+      if (titleObserver) titleObserver.disconnect();
+      if (!el) return;
+
+      rawTitle = stripMetadata(el.textContent);
+      updateTitle();
+
+      titleObserver = new MutationObserver(() => {
+        handleTitleChange(el);
+      });
+
+      titleObserver.observe(el, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+    }
+
+    // 1. Initially try to observe the title element
+    const initialTitleEl = document.querySelector("title");
+    if (initialTitleEl) observeTitleEl(initialTitleEl);
+
+    // 2. Watch document.head (shallow) for title element replacement/addition
+    const headObserver = new MutationObserver((mutations) => {
+      let newTitleEl = null;
       for (const mutation of mutations) {
         if (mutation.type === "childList") {
-          if (mutation.target.nodeName === "TITLE") {
-            titleChanged = true;
-            break;
-          }
-          for (const addedNode of mutation.addedNodes) {
-            if (addedNode.nodeName === "TITLE") {
-              titleChanged = true;
-              break;
+          for (const node of mutation.addedNodes) {
+            if (node.nodeName === "TITLE") {
+              newTitleEl = node;
             }
           }
         }
-        if (
-          mutation.type === "characterData" &&
-          mutation.target.parentNode?.nodeName === "TITLE"
-        ) {
-          titleChanged = true;
-        }
-        if (titleChanged) break;
       }
-
-      if (titleChanged) {
-        const el = document.querySelector("title");
-        if (el) {
-          const content = el.textContent;
-          // The SEP check is the real re-entrancy guard here: isUpdating is
-          // synchronous but MutationObserver callbacks fire as microtasks,
-          // after isUpdating is already reset to false.
-          if (!content.includes(SEP)) {
-            rawTitle = content;
-            updateTitle();
-            startMetadataPolling();
-          }
-        }
+      if (newTitleEl) {
+        observeTitleEl(newTitleEl);
       }
     });
 
-    observer.observe(document.head || document.documentElement, {
+    headObserver.observe(document.head || document.documentElement, {
       childList: true,
-      subtree: true,    // catches <title> text-node mutations inside <head>
-      characterData: true,
+      subtree: false, // Huge performance boost over subtree: true
     });
   }
 
