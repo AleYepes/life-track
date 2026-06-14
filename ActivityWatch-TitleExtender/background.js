@@ -1,7 +1,7 @@
 // Background Service Worker for ActivityWatch Title Extender
 
-// Listen for updates to tabs (e.g. audible state changes, mute/unmute)
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+// Listen for tab updates (audible state changes, mute/unmute)
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   const stateUpdate = {};
   let hasUpdate = false;
 
@@ -9,39 +9,32 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     stateUpdate.audible = changeInfo.audible;
     hasUpdate = true;
   }
-
   if (changeInfo.mutedInfo !== undefined) {
     stateUpdate.muted = changeInfo.mutedInfo.muted;
     hasUpdate = true;
   }
 
   if (hasUpdate) {
-    // Send the state update to the tab's content script
-    chrome.tabs.sendMessage(tabId, {
-      type: "STATE_UPDATE",
-      state: stateUpdate
-    }).catch(() => {
-      // Catch errors silently if content script is not yet injected or active
-    });
+    chrome.tabs.sendMessage(tabId, { type: "STATE_UPDATE", state: stateUpdate })
+      .catch(() => {}); // Ignore: content script may not be active yet
   }
 });
 
-// Handle initial state query from content script when page loads
+// Handle initial state query from content script on page load
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_TAB_STATE") {
-    const tabId = sender.tab ? sender.tab.id : null;
+    const tabId = sender.tab?.id ?? null;
     if (tabId !== null) {
-      chrome.tabs.get(tabId, (tab) => {
-        if (chrome.runtime.lastError || !tab) {
-          sendResponse({ audible: false, muted: false });
-          return;
-        }
-        sendResponse({
+      // Promise-based API (MV3); return true keeps channel open for async response
+      chrome.tabs.get(tabId)
+        .then(tab => sendResponse({
           audible: tab.audible || false,
-          muted: (tab.mutedInfo && tab.mutedInfo.muted) || false
-        });
-      });
-      return true; // Keep message channel open for async response
+          muted: tab.mutedInfo?.muted || false,
+        }))
+        .catch(() => sendResponse({ audible: false, muted: false }));
+      return true;
     }
+    // [B1] Always call sendResponse — even when tabId is unavailable
+    sendResponse({ audible: false, muted: false });
   }
 });

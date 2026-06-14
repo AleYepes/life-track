@@ -19,20 +19,14 @@
   }
 
   // 1. Hook Document.prototype.title setter/getter
-  const titleDesc = Object.getOwnPropertyDescriptor(
-    Document.prototype,
-    "title",
-  );
+  const titleDesc = Object.getOwnPropertyDescriptor(Document.prototype, "title");
   if (!titleDesc) {
-    console.error(
-      "[AW Extender] Could not find Document.prototype.title descriptor.",
-    );
+    console.error("[AW Extender] Could not find Document.prototype.title descriptor.");
     return;
   }
   const rawGet = titleDesc.get;
   const rawSet = titleDesc.set;
 
-  // Initialize rawTitle from the current document title
   rawTitle = stripMetadata(rawGet.call(document));
 
   Object.defineProperty(Document.prototype, "title", {
@@ -44,9 +38,7 @@
         rawSet.call(this, value);
         return;
       }
-
       const newRaw = stripMetadata(value);
-      // Only trigger updates if the raw title content has actually changed
       if (newRaw !== rawTitle) {
         rawTitle = newRaw;
         updateTitle();
@@ -56,44 +48,49 @@
   });
 
   // 2. Extensible Site Scraper Registry
+  //    Each scraper may optionally define:
+  //      isComplete() → true once all fields are resolved (enables early poll exit)
+  //      _cache       → populated by scrape() to skip repeated work (P1)
   const SCRAPERS = [
     {
       name: "youtube",
       match: (host) => host.includes("youtube.com"),
-      scrape: () => {
-        const metadata = [];
+      _cache: null,
+      isComplete() {
+        return this._cache !== null;
+      },
+      scrape() {
+        // [P1] Return cached result once both fields are resolved
+        if (this._cache) return this._cache;
 
+        const metadata = [];
         let channelName = "";
         let videoId = "";
 
-        // Primary: Try to extract from page-level global variable
+        // Primary: page-level global (fast, no DOM query)
         const playerResponse = window.ytInitialPlayerResponse;
-        if (playerResponse && playerResponse.videoDetails) {
+        if (playerResponse?.videoDetails) {
           channelName = playerResponse.videoDetails.author;
           videoId = playerResponse.videoDetails.videoId;
         }
 
-        // Fallback: Query DOM elements if global variables are not yet populated
+        // Fallback: DOM query if global is not yet populated
         if (!channelName) {
           const channelEl = document.querySelector(
             "ytd-video-owner-renderer #channel-name a, #owner-name a, #upload-info .ytd-channel-name a",
           );
-          if (channelEl) {
-            channelName = channelEl.innerText.trim();
-          }
+          if (channelEl) channelName = channelEl.innerText.trim();
         }
 
         if (!videoId) {
-          const urlParams = new URLSearchParams(window.location.search);
-          videoId = urlParams.get("v");
+          videoId = new URLSearchParams(window.location.search).get("v");
         }
 
-        if (channelName) {
-          metadata.push(`channel: ${channelName}`);
-        }
-        if (videoId) {
-          metadata.push(`video_id: ${videoId}`);
-        }
+        if (channelName) metadata.push(`channel: ${channelName}`);
+        if (videoId) metadata.push(`video_id: ${videoId}`);
+
+        // Cache once fully resolved
+        if (channelName && videoId) this._cache = metadata;
 
         return metadata;
       },
@@ -101,59 +98,45 @@
     {
       name: "gmail",
       match: (host) => host.includes("mail.google.com"),
-      scrape: () => {
+      scrape() {
         const metadata = [];
-
-        // Sender element selector in Gmail conversation view
         const senderEl = document.querySelector(".gD");
         if (senderEl) {
-          const sender =
-            senderEl.getAttribute("email") || senderEl.innerText.trim();
-          if (sender) {
-            metadata.push(`sender: ${sender}`);
-          }
+          const sender = senderEl.getAttribute("email") || senderEl.innerText.trim();
+          if (sender) metadata.push(`sender: ${sender}`);
         }
         return metadata;
       },
     },
   ];
 
+  // Cache the matched scraper for the current host (SCRAPERS.find is only called once)
+  let _activeScraper = null;
+
   function getSiteMetadata() {
-    const host = window.location.hostname;
-    const scraper = SCRAPERS.find((s) => s.match(host));
-    if (scraper) {
+    if (_activeScraper === null) {
+      _activeScraper = SCRAPERS.find((s) => s.match(window.location.hostname)) ?? undefined;
+    }
+    if (_activeScraper) {
       try {
-        return scraper.scrape();
+        return _activeScraper.scrape();
       } catch (e) {
-        console.error(`[AW Extender] Scraper error on ${scraper.name}:`, e);
+        console.error(`[AW Extender] Scraper error on ${_activeScraper.name}:`, e);
       }
     }
     return [];
   }
 
   // 3. Format and update the tab title
-  function updateTitle() {
+  //    Accepts optional pre-computed siteMetadata to avoid a redundant getSiteMetadata() call (P3)
+  function updateTitle(siteMetadata) {
     if (isUpdating) return;
 
-    const currentTitle = rawTitle || "";
-    const url = window.location.href;
-    const siteMetadata = getSiteMetadata();
+    const metadata = [...(siteMetadata ?? getSiteMetadata())];
+    if (tabState.audible) metadata.push("audible: true");
+    if (tabState.muted) metadata.push("muted: true");
 
-    // Combine site-specific metadata and generic tab states
-    const metadata = [...siteMetadata];
-    if (tabState.audible) {
-      metadata.push("audible: true");
-    }
-    if (tabState.muted) {
-      metadata.push("muted: true");
-    }
-
-    // Assemble components: Title⌈URL⌈key1: value1⌈...⌈
-    let parts = [currentTitle, url];
-    if (metadata.length > 0) {
-      parts = parts.concat(metadata);
-    }
-    const formatted = parts.join(SEP) + SEP;
+    const formatted = [rawTitle || "", window.location.href, ...metadata].join(SEP) + SEP;
 
     isUpdating = true;
     try {
@@ -170,8 +153,11 @@
     if (pollInterval) clearInterval(pollInterval);
 
     let attempts = 0;
-    const maxAttempts = 15; // 15 attempts * 400ms = 6s max
-    let lastMetadataStr = "";
+    const maxAttempts = 15; // 15 × 400ms = 6s max
+
+    // [B4] Seed with current metadata so the first tick doesn't trigger a
+    //      redundant updateTitle() when the caller already ran it.
+    let lastMetadataStr = getSiteMetadata().join(",");
 
     pollInterval = setInterval(() => {
       attempts++;
@@ -179,13 +165,18 @@
       const siteMetadata = getSiteMetadata();
       const metadataStr = siteMetadata.join(",");
 
-      // If async loading resolves new metadata values, trigger a title update
       if (metadataStr !== lastMetadataStr) {
         lastMetadataStr = metadataStr;
-        updateTitle();
+        updateTitle(siteMetadata); // [P3] pass pre-computed metadata
       }
 
-      if (attempts >= maxAttempts) {
+      // [P2] Early exit: stop once the scraper signals completion or attempts are exhausted.
+      //      Sites with no scraper (_activeScraper is undefined) exit immediately.
+      const scraperDone = _activeScraper
+        ? (_activeScraper.isComplete?.() ?? false) // has scraper but no isComplete → keep polling
+        : true;                                    // no scraper → nothing to wait for
+
+      if (scraperDone || attempts >= maxAttempts) {
         clearInterval(pollInterval);
         pollInterval = null;
       }
@@ -194,6 +185,9 @@
 
   // 5. Hook history pushState/replaceState to detect SPA URL transitions
   function hookHistory() {
+    // [B3] Guard: pushState may not exist on non-HTTP pages (e.g. file://, chrome://)
+    if (typeof history === "undefined" || !history.pushState) return;
+
     const pushState = history.pushState;
     const replaceState = history.replaceState;
 
@@ -201,7 +195,6 @@
       pushState.apply(this, args);
       handleUrlChange();
     };
-
     history.replaceState = function (...args) {
       replaceState.apply(this, args);
       handleUrlChange();
@@ -216,12 +209,17 @@
     const currentUrl = window.location.href;
     if (currentUrl !== lastUrl) {
       lastUrl = currentUrl;
+      // Reset per-page scraper cache on SPA navigation (host stays the same)
+      if (_activeScraper) _activeScraper._cache = null;
       updateTitle();
       startMetadataPolling();
     }
   }
 
-  // 6. MutationObserver to capture initial HTML-parsed <title> elements and DOM overrides
+  // 6. MutationObserver — scoped to <head> only
+  //    [P4] The original observer watched document.documentElement with subtree+characterData,
+  //    firing on every text-node change across the entire page (very expensive on Gmail, etc.).
+  //    <title> is always a direct child of <head>, so limiting scope to <head> is sufficient.
   function initMutationObserver() {
     const titleEl = document.querySelector("title");
     if (titleEl) {
@@ -242,8 +240,7 @@
         }
         if (
           mutation.type === "characterData" &&
-          mutation.target.parentNode &&
-          mutation.target.parentNode.nodeName === "TITLE"
+          mutation.target.parentNode?.nodeName === "TITLE"
         ) {
           titleChanged = true;
         }
@@ -254,7 +251,9 @@
         const el = document.querySelector("title");
         if (el) {
           const content = el.textContent;
-          // Ignore mutations we triggered ourselves (containing SEP)
+          // The SEP check is the real re-entrancy guard here: isUpdating is
+          // synchronous but MutationObserver callbacks fire as microtasks,
+          // after isUpdating is already reset to false.
           if (!content.includes(SEP)) {
             rawTitle = content;
             updateTitle();
@@ -264,9 +263,9 @@
       }
     });
 
-    observer.observe(document.documentElement, {
+    observer.observe(document.head || document.documentElement, {
       childList: true,
-      subtree: true,
+      subtree: true,    // catches <title> text-node mutations inside <head>
       characterData: true,
     });
   }
@@ -285,9 +284,7 @@
       changed = true;
     }
 
-    if (changed) {
-      updateTitle();
-    }
+    if (changed) updateTitle();
   });
 
   // Start initialization
