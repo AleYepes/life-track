@@ -47,7 +47,91 @@ const AT_PREFIX = /^@/;
     },
   });
 
-  function channelFromLdJsonData(data) {
+  function ytVideoIdFromUrl(value) {
+    if (!value || typeof value !== "string") {
+      return "";
+    }
+
+    try {
+      const url = new URL(value, window.location.origin);
+      const fromSearch = url.searchParams.get("v");
+      if (fromSearch) {
+        return fromSearch;
+      }
+
+      const pathMatch = url.pathname.match(
+        /^\/(?:shorts|embed|live)\/([^/?#]+)/
+      );
+      if (pathMatch) {
+        return pathMatch[1];
+      }
+
+      if (url.hostname === "youtu.be") {
+        return url.pathname.replace(/^\/+/, "").split("/")[0];
+      }
+    } catch {
+      const match = value.match(
+        /(?:[?&]v=|\/(?:shorts|embed|live)\/)([A-Za-z0-9_-]+)/
+      );
+      return match?.[1] || "";
+    }
+
+    return "";
+  }
+
+  function ytCurrentVideoId() {
+    return ytVideoIdFromUrl(window.location.href);
+  }
+
+  function ytLdJsonMatchesCurrentVideo(item, currentVideoId) {
+    if (!currentVideoId) {
+      return true;
+    }
+
+    const candidates = [
+      item.videoId,
+      item.identifier,
+      item.url,
+      item.embedUrl,
+      item.contentUrl,
+      item["@id"],
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string") {
+        if (
+          candidate === currentVideoId ||
+          ytVideoIdFromUrl(candidate) === currentVideoId
+        ) {
+          return true;
+        }
+      } else if (candidate?.value === currentVideoId) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function ytRenderedVideoId() {
+    const renderedVideo = document.querySelector(
+      "ytd-watch-flexy[video-id], #movie_player[data-video-id]"
+    );
+    return (
+      renderedVideo?.getAttribute("video-id") ||
+      renderedVideo?.getAttribute("data-video-id") ||
+      ""
+    );
+  }
+
+  function ytRenderedPageMatchesCurrentVideo(currentVideoId) {
+    const renderedVideoId = ytRenderedVideoId();
+    return (
+      !(currentVideoId && renderedVideoId) || renderedVideoId === currentVideoId
+    );
+  }
+
+  function channelFromLdJsonData(data, currentVideoId) {
     let items;
     if (Array.isArray(data)) {
       items = data;
@@ -57,7 +141,12 @@ const AT_PREFIX = /^@/;
       items = [data];
     }
     for (const item of items) {
-      if (item["@type"] !== "VideoObject" || !item.author) {
+      if (
+        !item ||
+        item["@type"] !== "VideoObject" ||
+        !item.author ||
+        !ytLdJsonMatchesCurrentVideo(item, currentVideoId)
+      ) {
         continue;
       }
       const name =
@@ -69,13 +158,16 @@ const AT_PREFIX = /^@/;
     return null;
   }
 
-  function ytChannelFromLdJson() {
+  function ytChannelFromLdJson(currentVideoId) {
     const scripts = document.querySelectorAll(
       'script[type="application/ld+json"]'
     );
     for (const script of scripts) {
       try {
-        const name = channelFromLdJsonData(JSON.parse(script.textContent));
+        const name = channelFromLdJsonData(
+          JSON.parse(script.textContent),
+          currentVideoId
+        );
         if (name) {
           return name;
         }
@@ -91,15 +183,28 @@ const AT_PREFIX = /^@/;
       name: "youtube",
       match: (host) => host === "youtube.com" || host.endsWith(".youtube.com"),
       scrape() {
-        const ldName = ytChannelFromLdJson();
+        const currentVideoId = ytCurrentVideoId();
+        const ldName = ytChannelFromLdJson(currentVideoId);
         if (ldName) {
           return { metadata: [`channel: ${ldName}`], complete: true };
+        }
+
+        if (!ytRenderedPageMatchesCurrentVideo(currentVideoId)) {
+          return { metadata: [], complete: false };
         }
 
         const shortsAnchor = document.querySelector(
           "span.ytReelChannelBarViewModelChannelName a"
         );
         if (shortsAnchor) {
+          const shortsTitleEl = document.querySelector(
+            "yt-shorts-video-title-view-model"
+          );
+          const domShortTitle = shortsTitleEl?.textContent?.trim() || "";
+          if (!(domShortTitle && rawTitle.startsWith(domShortTitle))) {
+            return { metadata: [], complete: false };
+          }
+
           const handle = shortsAnchor.textContent.trim().replace(AT_PREFIX, "");
           return {
             metadata: handle ? [`channel: ${handle}`] : [],
