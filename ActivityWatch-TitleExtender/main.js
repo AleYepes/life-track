@@ -1,353 +1,140 @@
-const AT_PREFIX = /^@/;
-
 (() => {
-  const SEP = " ∼ ";
-  const ACTIVE_SCRAPER_UNSET = Symbol("active-scraper-unset");
-  let rawTitle = "";
-  let pollInterval = null;
-  let lastFormattedTitle = "";
+  const TITLE_METADATA_SEPARATOR = " ∼ ";
 
-  function stripMetadata(title) {
+  const originalTitleDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "title");
+  if (!originalTitleDescriptor) {
+    console.error("[AW Extender] Could not find Document.prototype.title descriptor.");
+    return;
+  }
+
+  const originalTitleGetter = originalTitleDescriptor.get;
+  const originalTitleSetter = originalTitleDescriptor.set;
+
+  // Placeholder for future site-specific metadata extractors
+  function getSiteMetadata() {
+    return [];
+  }
+
+  function applyEnrichedTitle(plainTitle) {
+    const siteMetadata = getSiteMetadata();
+    const enrichedTitle = [
+        plainTitle,
+        window.location.href,
+        ...siteMetadata
+    ].join(TITLE_METADATA_SEPARATOR) + TITLE_METADATA_SEPARATOR;
+
+    try {
+      originalTitleSetter.call(document, enrichedTitle);
+    } catch (error) {
+      console.error("[AW Extender] Failed to set enriched document title:", error);
+    }
+  }
+
+  function stripEnrichedMetadata(title) {
     if (!title) {
       return "";
     }
-    const sepIndex = title.indexOf(SEP);
-    return sepIndex === -1 ? title : title.slice(0, sepIndex);
+    const separatorIndex = title.indexOf(TITLE_METADATA_SEPARATOR);
+    return separatorIndex === -1 ? title : title.slice(0, separatorIndex);
   }
 
-  const titleDesc = Object.getOwnPropertyDescriptor(
-    Document.prototype,
-    "title"
-  );
-  if (!titleDesc) {
-    console.error(
-      "[AW Extender] Could not find Document.prototype.title descriptor."
-    );
-    return;
-  }
-  const rawGet = titleDesc.get;
-  const rawSet = titleDesc.set;
-
-  rawTitle = stripMetadata(rawGet.call(document));
-
-  // Page scripts keep seeing the clean title while Chromium exposes the enriched title.
+  // PROXY: Lie to the SPA
   Object.defineProperty(Document.prototype, "title", {
-    configurable: titleDesc.configurable,
-    enumerable: titleDesc.enumerable,
+    configurable: originalTitleDescriptor.configurable,
+    enumerable: originalTitleDescriptor.enumerable,
     get() {
-      return rawTitle;
+      return stripEnrichedMetadata(originalTitleGetter.call(document));
     },
     set(value) {
-      const newRaw = stripMetadata(value);
-      if (newRaw !== rawTitle) {
-        rawTitle = newRaw;
-        const metadata = updateTitle();
-        startMetadataPolling({ initialMetadata: metadata });
-      }
+      applyEnrichedTitle(stripEnrichedMetadata(value));
     },
   });
 
-  function ytVideoIdFromUrl(value) {
-    if (!value || typeof value !== "string") {
-      return "";
+  // TITLE OBSERVER: Catch DOM text bypasses
+  let titleMutationObserver = null;
+  function observeTitleElement(titleElement) {
+    if (titleMutationObserver) {
+      titleMutationObserver.disconnect();
     }
-
-    try {
-      const url = new URL(value, window.location.origin);
-      const fromSearch = url.searchParams.get("v");
-      if (fromSearch) {
-        return fromSearch;
-      }
-
-      const pathMatch = url.pathname.match(
-        /^\/(?:shorts|embed|live)\/([^/?#]+)/
-      );
-      if (pathMatch) {
-        return pathMatch[1];
-      }
-
-      if (url.hostname === "youtu.be") {
-        return url.pathname.replace(/^\/+/, "").split("/")[0];
-      }
-    } catch {
-      const match = value.match(
-        /(?:[?&]v=|\/(?:shorts|embed|live)\/)([A-Za-z0-9_-]+)/
-      );
-      return match?.[1] || "";
-    }
-
-    return "";
-  }
-
-  function ytCurrentVideoId() {
-    return ytVideoIdFromUrl(window.location.href);
-  }
-
-  function ytLdJsonMatchesCurrentVideo(item, currentVideoId) {
-    if (!currentVideoId) {
-      return true;
-    }
-
-    const candidates = [
-      item.videoId,
-      item.identifier,
-      item.url,
-      item.embedUrl,
-      item.contentUrl,
-      item["@id"],
-    ];
-
-    for (const candidate of candidates) {
-      if (typeof candidate === "string") {
-        if (
-          candidate === currentVideoId ||
-          ytVideoIdFromUrl(candidate) === currentVideoId
-        ) {
-          return true;
-        }
-      } else if (candidate?.value === currentVideoId) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  function ytRenderedVideoId() {
-    const renderedVideo = document.querySelector(
-      "ytd-watch-flexy[video-id], #movie_player[data-video-id]"
-    );
-    return (
-      renderedVideo?.getAttribute("video-id") ||
-      renderedVideo?.getAttribute("data-video-id") ||
-      ""
-    );
-  }
-
-  function ytRenderedPageMatchesCurrentVideo(currentVideoId) {
-    const renderedVideoId = ytRenderedVideoId();
-    return (
-      !(currentVideoId && renderedVideoId) || renderedVideoId === currentVideoId
-    );
-  }
-
-  function channelFromLdJsonData(data, currentVideoId) {
-    let items;
-    if (Array.isArray(data)) {
-      items = data;
-    } else if (data["@graph"]) {
-      items = [].concat(data["@graph"]);
-    } else {
-      items = [data];
-    }
-    for (const item of items) {
-      if (
-        !item ||
-        item["@type"] !== "VideoObject" ||
-        !item.author ||
-        !ytLdJsonMatchesCurrentVideo(item, currentVideoId)
-      ) {
-        continue;
-      }
-      const name =
-        typeof item.author === "string" ? item.author : item.author?.name;
-      if (name) {
-        return name;
-      }
-    }
-    return null;
-  }
-
-  function ytChannelFromLdJson(currentVideoId) {
-    const scripts = document.querySelectorAll(
-      'script[type="application/ld+json"]'
-    );
-    for (const script of scripts) {
-      try {
-        const name = channelFromLdJsonData(
-          JSON.parse(script.textContent),
-          currentVideoId
-        );
-        if (name) {
-          return name;
-        }
-      } catch {
-        // malformed script tag — skip
-      }
-    }
-    return null;
-  }
-
-  const SCRAPERS = [
-    {
-      name: "youtube",
-      match: (host) => host === "youtube.com" || host.endsWith(".youtube.com"),
-      scrape() {
-        const currentVideoId = ytCurrentVideoId();
-        const ldName = ytChannelFromLdJson(currentVideoId);
-        if (ldName) {
-          return { metadata: [`channel: ${ldName}`], complete: true };
-        }
-
-        if (!ytRenderedPageMatchesCurrentVideo(currentVideoId)) {
-          return { metadata: [], complete: false };
-        }
-
-        const shortsAnchor = document.querySelector(
-          "span.ytReelChannelBarViewModelChannelName a"
-        );
-        if (shortsAnchor) {
-          const shortsTitleEl = document.querySelector(
-            "yt-shorts-video-title-view-model"
-          );
-          const domShortTitle = shortsTitleEl?.textContent?.trim() || "";
-          if (!(domShortTitle && rawTitle.startsWith(domShortTitle))) {
-            return { metadata: [], complete: false };
-          }
-
-          const handle = shortsAnchor.textContent.trim().replace(AT_PREFIX, "");
-          return {
-            metadata: handle ? [`channel: ${handle}`] : [],
-            complete: Boolean(handle),
-          };
-        }
-
-        const channelName =
-          document
-            .querySelector('span[itemprop="author"] link[itemprop="name"]')
-            ?.getAttribute("content") ||
-          document
-            .querySelector(
-              "ytd-video-owner-renderer #channel-name a, #owner-name a"
-            )
-            ?.innerText.trim() ||
-          "";
-        return {
-          metadata: channelName ? [`channel: ${channelName}`] : [],
-          complete: Boolean(channelName),
-        };
-      },
-    },
-    {
-      name: "gmail",
-      match: (host) => host === "mail.google.com",
-      scrape() {
-        const metadata = [];
-        const openMessage = document.querySelector(
-          '[role="listitem"][aria-expanded="true"]'
-        );
-
-        if (openMessage) {
-          const senderEl = openMessage.querySelector(
-            "[jid], [data-hovercard-id]"
-          );
-          if (senderEl) {
-            const sender =
-              senderEl.getAttribute("jid") ||
-              senderEl.getAttribute("data-hovercard-id");
-            if (sender) {
-              metadata.push(`sender: ${sender}`);
-            }
-          }
-        }
-
-        return { metadata, complete: Boolean(metadata.length > 0) };
-      },
-    },
-  ];
-
-  let _activeScraper = ACTIVE_SCRAPER_UNSET;
-
-  function getActiveScraper() {
-    if (_activeScraper === ACTIVE_SCRAPER_UNSET) {
-      _activeScraper = SCRAPERS.find((s) => s.match(window.location.hostname));
-    }
-    return _activeScraper;
-  }
-
-  function scrapeSiteMetadata() {
-    const scraper = getActiveScraper();
-    if (scraper) {
-      try {
-        return scraper.scrape();
-      } catch (e) {
-        console.error(`[AW Extender] Scraper error on ${scraper.name}:`, e);
-      }
-    }
-    return { metadata: [], complete: true };
-  }
-
-  function updateTitle(siteMetadata) {
-    const metadata = siteMetadata ?? scrapeSiteMetadata().metadata;
-
-    const formatted =
-      [rawTitle, window.location.href, ...metadata].join(SEP) + SEP;
-    if (formatted === lastFormattedTitle) {
-      return metadata;
-    }
-
-    try {
-      rawSet.call(document, formatted);
-      lastFormattedTitle = formatted;
-    } catch (e) {
-      console.error("[AW Extender] Failed to set document title:", e);
-    }
-
-    return metadata;
-  }
-
-  function startMetadataPolling({
-    forceFirstUpdate = false,
-    initialMetadata,
-  } = {}) {
-    if (pollInterval) {
-      clearInterval(pollInterval);
-    }
-
-    const scraper = getActiveScraper();
-    if (!scraper) {
-      pollInterval = null;
+    if (!titleElement) {
       return;
     }
 
-    let attempts = 0;
-    const maxAttempts = 15;
-    let lastMetadataStr = forceFirstUpdate
-      ? null
-      : (initialMetadata ?? scrapeSiteMetadata().metadata).join(",");
+    const currentText = titleElement.textContent;
+    if (typeof currentText === "string" && !currentText.includes(TITLE_METADATA_SEPARATOR)) {
+      applyEnrichedTitle(currentText);
+    }
 
-    pollInterval = setInterval(() => {
-      attempts++;
-
-      const result = scrapeSiteMetadata();
-      const metadataStr = result.metadata.join(",");
-
-      if (metadataStr !== lastMetadataStr) {
-        lastMetadataStr = metadataStr;
-        updateTitle(result.metadata);
+    titleMutationObserver = new MutationObserver(() => {
+      const updatedText = titleElement.textContent;
+      if (typeof updatedText === "string" && !updatedText.includes(TITLE_METADATA_SEPARATOR)) {
+        applyEnrichedTitle(updatedText);
       }
+    });
 
-      if (result.complete || attempts >= maxAttempts) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-      }
-    }, 400);
+    titleMutationObserver.observe(titleElement, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
   }
 
-  function hookHistory() {
+  // HEAD OBSERVER: Catch node replacements
+  function observeHead(headElement) {
+    const existingTitle = headElement.querySelector("title");
+    if (existingTitle) {
+      observeTitleElement(existingTitle);
+    }
+
+    const headMutationObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const addedNode of mutation.addedNodes) {
+          if (addedNode.nodeName === "TITLE") {
+            observeTitleElement(addedNode);
+          }
+        }
+      }
+    });
+
+    headMutationObserver.observe(headElement, { childList: true });
+  }
+
+  // INITIALIZATION: run_at document_start handling
+  function initializeDOMObservers() {
+    if (document.head) {
+      observeHead(document.head);
+    } else {
+      const documentObserver = new MutationObserver((_, obs) => {
+        if (document.head) {
+          observeHead(document.head);
+          obs.disconnect();
+        }
+      });
+      documentObserver.observe(document.documentElement, { childList: true });
+    }
+  }
+
+  // HISTORY HOOKS: Catch URL changes
+  function initializeHistoryHooks() {
     if (typeof history === "undefined" || !history.pushState) {
       return;
     }
+    
+    function handleUrlChange() {
+        applyEnrichedTitle(
+            stripEnrichedMetadata(originalTitleGetter.call(document))
+        );
+    }
 
-    const pushState = history.pushState;
-    const replaceState = history.replaceState;
-
+    const originalPushState = history.pushState;
     history.pushState = function (...args) {
-      pushState.apply(this, args);
-      handleUrlChange();
+        originalPushState.apply(this, args);
+        handleUrlChange();
     };
+    
+    const originalReplaceState = history.replaceState;
     history.replaceState = function (...args) {
-      replaceState.apply(this, args);
+      originalReplaceState.apply(this, args);
       handleUrlChange();
     };
 
@@ -355,112 +142,6 @@ const AT_PREFIX = /^@/;
     window.addEventListener("hashchange", handleUrlChange);
   }
 
-  let lastUrl = window.location.href;
-  function handleUrlChange() {
-    const currentUrl = window.location.href;
-    if (currentUrl !== lastUrl) {
-      lastUrl = currentUrl;
-      _activeScraper = ACTIVE_SCRAPER_UNSET;
-      updateTitle([]);
-      startMetadataPolling({ forceFirstUpdate: true });
-    }
-  }
-
-  function initMutationObserver() {
-    let titleObserver = null;
-    let headObserver = null;
-
-    function handleTitleChange(el) {
-      if (!el) {
-        return;
-      }
-      const content = el.textContent;
-      if (!content.includes(SEP)) {
-        rawTitle = content;
-        const metadata = updateTitle();
-        startMetadataPolling({ initialMetadata: metadata });
-      }
-    }
-
-    function observeTitleEl(el) {
-      if (titleObserver) {
-        titleObserver.disconnect();
-      }
-      if (!el) {
-        return false;
-      }
-
-      rawTitle = stripMetadata(el.textContent);
-      const metadata = updateTitle();
-      startMetadataPolling({ initialMetadata: metadata });
-
-      titleObserver = new MutationObserver(() => {
-        handleTitleChange(el);
-      });
-
-      titleObserver.observe(el, {
-        childList: true,
-        characterData: true,
-        subtree: true,
-      });
-
-      return true;
-    }
-
-    function findAddedTitleElement(mutations) {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeName === "TITLE") {
-            return node;
-          }
-        }
-      }
-      return null;
-    }
-
-    function observeHead() {
-      if (!document.head || headObserver) {
-        return false;
-      }
-
-      const titleObserved = observeTitleEl(document.querySelector("title"));
-
-      headObserver = new MutationObserver((mutations) => {
-        const newTitleEl = findAddedTitleElement(mutations);
-        if (newTitleEl) {
-          observeTitleEl(newTitleEl);
-        }
-      });
-
-      headObserver.observe(document.head, { childList: true });
-      return titleObserved;
-    }
-
-    const titleObserved = observeHead();
-
-    if (!headObserver) {
-      const rootObserver = new MutationObserver(() => {
-        observeHead();
-        if (headObserver) {
-          rootObserver.disconnect();
-        }
-      });
-
-      rootObserver.observe(document.documentElement, { childList: true });
-    }
-
-    return titleObserved;
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => {
-      if (!initMutationObserver()) {
-        startMetadataPolling();
-      }
-    });
-  } else if (!initMutationObserver()) {
-    startMetadataPolling();
-  }
-
-  hookHistory();
+  initializeDOMObservers();
+  initializeHistoryHooks();
 })();
