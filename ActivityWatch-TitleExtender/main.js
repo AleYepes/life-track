@@ -5,7 +5,6 @@
   const REGEX_YT_SHORTS = /\/shorts\//;
   const REGEX_YT_SHORTS_ID = /\/shorts\/([^/?#]+)/;
   const REGEX_GMAIL_PATH = /#(?:inbox|all|sent|drafts|starred|important|label)\//;
-  const REGEX_CLEAN_TITLE = /[^a-z0-9]/g;
 
   const titleDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "title");
   if (!(titleDescriptor?.get && titleDescriptor?.set)) {
@@ -67,23 +66,6 @@
       match: (host) => host === "www.youtube.com" || host === "youtube.com",
       shouldRun: (url) => REGEX_YT_WATCH.test(url) || REGEX_YT_SHORTS.test(url),
 
-      // Returns true if the DOM title element doesn't match the current tab title,
-      // indicating stale/recycled DOM content from a previous video.
-      _isTitleStale(domTitleEl) {
-        const domTitle = domTitleEl?.textContent?.trim();
-        if (!(domTitle && currentPlainTitle)) return false;
-
-        const normalizedDom = domTitle.toLowerCase().replace(REGEX_CLEAN_TITLE, "");
-        const normalizedTab = currentPlainTitle.toLowerCase().replace(REGEX_CLEAN_TITLE, "");
-
-        return (
-          normalizedTab &&
-          normalizedDom &&
-          !normalizedTab.includes(normalizedDom) &&
-          !normalizedDom.includes(normalizedTab)
-        );
-      },
-
       _scrapeShorts(url) {
         const match = url.match(REGEX_YT_SHORTS_ID);
         const expectedShortsId = match ? match[1] : null;
@@ -98,11 +80,6 @@
         if (expectedShortsId && domVideoId && domVideoId !== expectedShortsId) {
           return [];
         }
-
-        const reelTitleEl = activeReel?.querySelector(
-          '#video-title, .title, h2, h3, [class*="title" i]'
-        );
-        if (this._isTitleStale(reelTitleEl)) return [];
 
         const el = activeReel?.querySelector(
           "yt-reel-channel-bar-view-model .ytReelChannelBarViewModelChannelName a"
@@ -130,12 +107,6 @@
         const watchFlexy = document.querySelector("ytd-watch-flexy");
         const domVideoId = watchFlexy?.getAttribute("video-id");
         if (domVideoId && domVideoId !== v) return [];
-
-        // Verify DOM metadata matches the current tab title.
-        const domTitleEl = document.querySelector(
-          "ytd-watch-metadata h1, #title h1, h1.ytd-video-primary-info-renderer"
-        );
-        if (this._isTitleStale(domTitleEl)) return [];
 
         // Extract channel name from DOM (multiple selector strategies).
         const selectors = [
