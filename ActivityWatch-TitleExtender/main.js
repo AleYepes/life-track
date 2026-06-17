@@ -22,6 +22,7 @@
   let activeScraper = null;
   let activeScraperCleanup = null;
   let pendingBodyWatcher = null;
+  let lastKnownUrl = window.location.href;
 
   function debounce(fn, delay) {
     let timeout;
@@ -315,6 +316,14 @@
         currentMetadata = [];
       }
 
+      // Detect URL changes that may not have triggered history hooks
+      // (common on SPAs like YouTube that set the title before pushing state).
+      const currentUrl = window.location.href;
+      if (currentUrl !== lastKnownUrl) {
+        lastKnownUrl = currentUrl;
+        installActiveScraper();
+      }
+
       applyEnrichedTitle();
     },
   });
@@ -386,12 +395,14 @@
     const originalPushState = history.pushState;
     history.pushState = function (...args) {
       originalPushState.apply(this, args);
+      lastKnownUrl = window.location.href;
       handleUrlChange();
     };
 
     const originalReplaceState = history.replaceState;
     history.replaceState = function (...args) {
       originalReplaceState.apply(this, args);
+      lastKnownUrl = window.location.href;
       handleUrlChange();
     };
 

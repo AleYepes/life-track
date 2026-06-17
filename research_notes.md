@@ -61,22 +61,25 @@ Gmail's observer simply calls `onRefresh()` (no args) followed by `onApply()`, w
 
 ---
 
-## Defensive Guards (Probably Redundant, Not Yet Tested)
+## Defensive Guards (Confirmed Redundant — Removed)
 
-### 7. DOM Title Fuzzy Matching (`_isTitleStale`)
-**Where**: Called in both `_scrapeShorts()` and `_scrapeWatch()`.  
-**What**: Normalizes and compares the DOM's visible title element against the tab's `currentPlainTitle`. If they diverge significantly, declares the DOM stale and returns `[]`.  
-**Why**: An additional staleness signal on top of video-ID checking. Likely redundant given mechanisms 1, 2, 4, and 6.
+### 7. DOM Title Fuzzy Matching (`_isTitleStale`) — **REMOVED in phase 2a**
+**What it was**: Normalized and compared the DOM's visible title element against `currentPlainTitle`. Returned `[]` if they diverged.  
+**Why removed**: Confirmed redundant. The video-ID attribute check, stability polling (3×), and metadata reset on title change collectively prevent stale metadata from being published. Removing it caused no regressions.
+
+---
+
+## Essential — Misclassified as Defensive
 
 ### 8. `lastKnownUrl` Tracking in Title Setter
-**Where**: `Document.prototype.title` setter.  
-**What**: Detects URL changes that haven't triggered history hooks and calls `installActiveScraper()`.  
-**Why**: Belt-and-suspenders for SPAs that might set the title before calling `pushState`/`replaceState`. May be redundant if history hooks always fire first on YouTube.
+**Where**: `Document.prototype.title` setter + `lastKnownUrl = window.location.href` sync assignments in history hooks.  
+**What**: Detects URL changes that haven't yet triggered history hooks and calls `installActiveScraper()`.  
+**Why it's essential**: On YouTube Shorts navigation, the title change (step 1) consistently *precedes* the `replaceState` call (step 2). Without the title setter's URL check, `installActiveScraper()` is never called and the polling observer never starts — metadata stops working entirely on navigation. Confirmed load-bearing by phase 2b failure.
 
 ### 9. `pendingBodyWatcher`
 **Where**: `installActiveScraper()`.  
-**What**: Defers observer setup until `document.body` exists (for `run_at: "document_start"`).  
-**Why**: On initial cold page load of a YouTube URL, `document.body` may not exist yet. During SPA navigation (the common case for Shorts), `document.body` always exists.
+**What**: Defers observer setup until `document.body` exists.  
+**Why it's essential**: `run_at: "document_start"` means the script executes before `document.body` exists on cold page loads. `handleUrlChange()` is called at bootstrap, which calls `installActiveScraper()`. Without this guard, `activeScraper.observe()` would run before the body exists, and Gmail's observer (`document.querySelector('div[role="main"]') || document.body`) would fail silently.
 
 ---
 
@@ -88,3 +91,20 @@ Gmail's observer simply calls `onRefresh()` (no args) followed by `onApply()`, w
 **Root cause**: Two mechanisms broke simultaneously:
 1. Eager scraping populated `currentMetadata` with the old channel name before the observer even started.
 2. The single-callback pattern forced the core engine to re-scrape on notification. During a slow transition, the poll stabilized on the stale channel name (which remained static in the DOM), called `onRelevantChange()`, the core engine re-scraped, found the same stale data already in `currentMetadata`, detected no change, and exited — locking in the stale metadata permanently.
+
+### Attempt 2 (phase 2b): Remove `lastKnownUrl` Tracking
+**What was changed**: Removed the `lastKnownUrl` variable, the URL-change detection block in the title setter, and the two `lastKnownUrl = window.location.href` sync lines in the history hooks.  
+**Result**: Metadata stopped working entirely on YouTube — no channel metadata appeared at all after navigating.  
+**Root cause**: On YouTube Shorts navigation, `document.title` is set *before* `history.replaceState()` is called. The title setter's URL-change detection (`currentUrl !== lastKnownUrl → installActiveScraper()`) is therefore the *primary* mechanism that starts the polling observer. Removing it meant `installActiveScraper()` was never called on navigation, so the observer never ran. The history hooks alone are insufficient because they fire after the title has already been set.
+
+> **Implication**: `lastKnownUrl` is not belt-and-suspenders — it is the essential trigger for scraper installation on YouTube. The `lastKnownUrl = window.location.href` sync assignments inside history hooks are equally essential: without them, every title change on the new page would re-detect the URL as changed and redundantly call `installActiveScraper()` again, tearing down the running observer on each title update.
+
+## Current Stable State
+
+Phase 2a (`f48fe2c`) is considered the refined final version:
+- **527 → 418 lines** (-21% from the debugging-era WIP)
+- All debug logs removed
+- YouTube helpers encapsulated as private methods on the scraper object
+- `_isTitleStale` confirmed redundant and removed
+- All remaining mechanisms confirmed essential
+- No further trimming is warranted without risking regressions
